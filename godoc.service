@@ -1,0 +1,2 @@
+[Service]
+ExecStart=%h/go/bin/socket-activated-godoc
