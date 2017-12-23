@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"context"
 	_ "expvar" // to serve /debug/vars
 	"flag"
 	"go/build"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"golang.org/x/tools/godoc"
 	"golang.org/x/tools/godoc/analysis"
@@ -33,6 +35,8 @@ var (
 	analysisFlag = flag.String("analysis", "", `comma-separated list of analyses to perform (supported: type, pointer). See http://golang.org/lib/godoc/analysis/help.html`)
 
 	httpAddr = flag.String("http", defaultAddr, "HTTP service address (e.g., '"+defaultAddr+"')")
+
+	inactivityTimeout = flag.Duration("inactivity_timeout", 5*time.Minute, "Inactivity timeout for socket activation")
 
 	verbose = flag.Bool("v", false, "verbose mode")
 
@@ -158,6 +162,8 @@ func main() {
 
 	var ln net.Listener
 
+	server := &http.Server{}
+
 	switch len(listeners) {
 	case 0:
 		var err error
@@ -173,9 +179,30 @@ func main() {
 		if *verbose {
 			log.Printf("address (socket-activated) = %s", ln.Addr())
 		}
+
+		h := newLastActivityHTTPHandler(server.Handler, *inactivityTimeout)
+		server.Handler = h
+		go func() {
+			var err error
+			<-h.timer.C
+			log.Print("HTTP inactivity timeout, shutting down")
+
+			ctx, _ := context.WithTimeout(context.TODO(), time.Second*30)
+			err = server.Shutdown(ctx)
+			if err != nil {
+				log.Print("Error during server shutdown: ", err)
+			}
+			err = server.Close()
+			if err != nil {
+				log.Print("Error during server close: ", err)
+			}
+		}()
 	default:
 		log.Fatal("Unexpected number of sockets passed from systemd: ", len(listeners))
 	}
 
-	log.Fatal(http.Serve(ln, nil))
+	err = server.Serve(ln)
+	if err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }
